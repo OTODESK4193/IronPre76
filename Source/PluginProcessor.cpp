@@ -2,21 +2,15 @@
 #include "PluginEditor.h"
 
 IronPre76AudioProcessor::IronPre76AudioProcessor()
-#ifndef JucePlugin_PreferredChannelConfigurations
     : AudioProcessor(BusesProperties()
-#if ! JucePlugin_IsMidiEffect
-#if ! JucePlugin_IsSynth
         .withInput("Input", juce::AudioChannelSet::stereo(), true)
-#endif
-        .withOutput("Output", juce::AudioChannelSet::stereo(), true)
-#endif
-    ),
-#endif
+        .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
     apvts(*this, nullptr, "Parameters", createParameterLayout()),
     oversampler(2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true)
 {
-    // パラメータポインタの初期化（processBlockでの高速アクセス用）
     gainStepParam = apvts.getRawParameterValue("gain_step");
+    hpfFreqParam = apvts.getRawParameterValue("hpf_freq");
+    lpfFreqParam = apvts.getRawParameterValue("lpf_freq");
 }
 
 IronPre76AudioProcessor::~IronPre76AudioProcessor() {}
@@ -24,21 +18,18 @@ IronPre76AudioProcessor::~IronPre76AudioProcessor() {}
 juce::AudioProcessorValueTreeState::ParameterLayout IronPre76AudioProcessor::createParameterLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
-
-    // V76sの12ステップ・ゲイン設定
     juce::StringArray gainSteps = { "3", "9", "18", "24", "34", "40", "46", "52", "58", "64", "70", "76" };
+    layout.add(std::make_unique<juce::AudioParameterChoice>("gain_step", "Preamp Gain (dB)", gainSteps, 4));
 
-    layout.add(std::make_unique<juce::AudioParameterChoice>(
-        "gain_step",
-        "Preamp Gain (dB)",
-        gainSteps,
-        4 // デフォルト: 34dB (インデックス4)
-    ));
+    juce::StringArray hpfSteps = { "Bridged", "30", "60", "120" };
+    layout.add(std::make_unique<juce::AudioParameterChoice>("hpf_freq", "HPF Freq (Hz)", hpfSteps, 0));
 
+    juce::StringArray lpfSteps = { "Off", "8k", "10k", "12k", "15k" };
+    layout.add(std::make_unique<juce::AudioParameterChoice>("lpf_freq", "LPF Freq (Hz)", lpfSteps, 0));
     return layout;
 }
 
-const juce::String IronPre76AudioProcessor::getName() const { return JucePlugin_Name; }
+const juce::String IronPre76AudioProcessor::getName() const { return "IronPre76"; }
 bool IronPre76AudioProcessor::acceptsMidi() const { return false; }
 bool IronPre76AudioProcessor::producesMidi() const { return false; }
 bool IronPre76AudioProcessor::isMidiEffect() const { return false; }
@@ -56,60 +47,58 @@ void IronPre76AudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlo
     spec.maximumBlockSize = samplesPerBlock;
     spec.numChannels = getTotalNumOutputChannels();
 
-    // 各DSPコンポーネントの初期化 (動的メモリ確保はここで行う)
     linearEQ.prepare(spec);
     oversampler.initProcessing(samplesPerBlock);
+
+    // 真空管モデルはオーバーサンプリングされた高いサンプルレートで動作させる
+    juce::dsp::ProcessSpec osSpec = spec;
+    osSpec.sampleRate = sampleRate * oversampler.getOversamplingFactor();
+    tubeStageModel.prepare(osSpec);
 }
 
 void IronPre76AudioProcessor::releaseResources()
 {
     linearEQ.reset();
+    tubeStageModel.reset();
     oversampler.reset();
 }
 
 bool IronPre76AudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-        && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    return true;
+    return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::mono() ||
+        layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
 void IronPre76AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
+    // パラメータ取得
+    int gIdx = static_cast<int>(gainStepParam->load());
+    int hIdx = static_cast<int>(hpfFreqParam->load());
+    int lIdx = static_cast<int>(lpfFreqParam->load());
 
-    // ロックフリーなパラメータ取得 (0 〜 11 のインデックス値が返る)
-    int currentGainIndex = static_cast<int>(gainStepParam->load());
+    // 1. パラメータの更新
+    linearEQ.updateParameters(gIdx, hIdx, lIdx);
+    tubeStageModel.updateParameters(gIdx);
 
-    // --- Audio Processing Logic ---
     juce::dsp::AudioBlock<float> block(buffer);
 
-    // 1. リニア処理段 (オーバーサンプリング前に実行しCPU負荷を最小化)
+    // 2. パッシブEQネットワーク（アナログカーブ）の適用
     linearEQ.process(block);
 
-    // 2. オーバーサンプリング (非線形処理の前に実行)
+    // 3. オーバーサンプリングによるエイリアシングノイズの抑制[cite: 2]
     auto upsampledBlock = oversampler.processSamplesUp(block);
 
-    // 3. 非線形処理
-    // TODO: ここに各DSPステージ(真空管・トランス)のprocessを実装
+    // 4. EF804S 真空管物理モデリングの適用 (Zero-Compromise)
+    tubeStageModel.process(upsampledBlock);
 
-    // 4. ダウンサンプリング
+    // 5. ダウンサンプリング
     oversampler.processSamplesDown(block);
 }
 
 bool IronPre76AudioProcessor::hasEditor() const { return true; }
-
-juce::AudioProcessorEditor* IronPre76AudioProcessor::createEditor()
-{
-    return new IronPre76AudioProcessorEditor(*this);
-}
+juce::AudioProcessorEditor* IronPre76AudioProcessor::createEditor() { return new IronPre76AudioProcessorEditor(*this); }
 
 void IronPre76AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
@@ -121,9 +110,8 @@ void IronPre76AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 void IronPre76AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
-    if (xmlState.get() != nullptr)
-        if (xmlState->hasTagName(apvts.state.getType()))
-            apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
+    if (xmlState != nullptr && xmlState->hasTagName(apvts.state.getType()))
+        apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new IronPre76AudioProcessor(); }

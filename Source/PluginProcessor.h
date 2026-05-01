@@ -1,14 +1,9 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "DSP/TransformerModel.h"
-#include "DSP/TubeStageModel.h"
 #include "DSP/LinearEQ.h"
+#include "TubeStageModel.h"
 
-/**
- * IronPre76AudioProcessor
- * Telefunken V76sのアナログモデリング・コア・プロセッサ
- */
 class IronPre76AudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -17,16 +12,13 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
-
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
-
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override;
 
     const juce::String getName() const override;
-
     bool acceptsMidi() const override;
     bool producesMidi() const override;
     bool isMidiEffect() const override;
@@ -41,21 +33,17 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // パラメータ管理用のAPVTS
     juce::AudioProcessorValueTreeState apvts;
 
 private:
-    // パラメータレイアウトの生成
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    // ゲインステップのインデックス取得用ポインタ（ロックフリーで安全にアクセス）
     std::atomic<float>* gainStepParam = nullptr;
+    std::atomic<float>* hpfFreqParam = nullptr;
+    std::atomic<float>* lpfFreqParam = nullptr;
 
-    // --- DSP Components ---
-    // リニアEQ (基礎帯域の形成)
     LinearEQ linearEQ;
-
-    // オーバーサンプリング (非線形処理のエイリアシング対策)
+    TubeStageModel tubeStageModel;
     juce::dsp::Oversampling<float> oversampler;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(IronPre76AudioProcessor)

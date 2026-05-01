@@ -3,6 +3,10 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
+/**
+ * IronPre76AudioProcessorEditor
+ * V76sの物理的な操作感を再現する3つのロータリーノブを備えたGUIクラス。
+ */
 class IronPre76AudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
@@ -15,11 +19,19 @@ public:
 private:
     IronPre76AudioProcessor& audioProcessor;
 
-    // V76s ゲイン操作用のスライダー（ロータリーノブ）
+    // --- UI Components ---
+    // メインゲインノブ
     juce::Slider gainSlider;
+    // ハイパスフィルター切り替えノブ
+    juce::Slider hpfSlider;
+    // ローパスフィルター切り替えノブ
+    juce::Slider lpfSlider;
 
-    // APVTSとの安全な同期用アタッチメント
+    // --- Attachments ---
+    // APVTSのパラメータと安全に同期するためのアタッチメント
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> hpfAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lpfAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(IronPre76AudioProcessorEditor)
 };
