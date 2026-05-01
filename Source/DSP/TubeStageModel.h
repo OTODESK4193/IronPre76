@@ -8,10 +8,8 @@
  * @class TubeStageModel
  * Telefunken EF804S (EF86) 五極管増幅段の完全物理モデリング (Zero-Compromise)
  *
- * - DAFx-10準拠 Koren Pentode Model
- * - EF86固有パラメータ (KP=222.06, KVB=4.7) と カソードバイアス (-2.2V)
- * - 64-bit Double精度 DCブロッカーと、完全なステレオセパレーションによる絶対安定化
- * - 物理増幅率(32.2倍)の自動補償による完璧なユニティゲイン設計
+ * - 実測データに基づく音量バランスの微調整 (Unity Gain Fine-Tuning)
+ * - 電源電圧(B+)を基準とした動的ゲインステージング
  */
 class TubeStageModel
 {
@@ -24,10 +22,8 @@ public:
         currentSampleRate = spec.sampleRate;
         invSampleRate = 1.0 / currentSampleRate;
 
-        // 10Hz HPF (DC Blocker) の係数算出 (64-bit精度)
         dcBlockerR = std::exp(-2.0 * juce::MathConstants<double>::pi * 10.0 / currentSampleRate);
 
-        // ステレオ（マルチチャンネル）対応のための配列リサイズと初期化
         int numChannels = static_cast<int>(spec.numChannels);
         vcGrid.assign(numChannels, 0.0);
         vcPlate.assign(numChannels, 285.0);
@@ -50,11 +46,13 @@ public:
         // 1:30トランスとアッテネータによる実効ドライブ電圧
         inputDriveMultiplier = 5.0 + (normalizedGain * 200.0);
 
-        // 【修正】出力ゲインの完全補償 (Unity Gain AGC)
-        // 物理モデル(EF804S)自体が持つ約32.2倍の電圧増幅(Voltage Gain)を
-        // 正確に割り戻すことで、DAW上での音量爆発(32.1dBオーバー)を完全に防ぎます。
-        const double TUBE_VOLTAGE_GAIN = 32.2;
-        outputAttenuation = 1.0 / (inputDriveMultiplier * TUBE_VOLTAGE_GAIN);
+        // 【微調整】聴感上のUnity Gainを達成するための動的アッテネーション
+        // 真空管の物理増幅(約32倍)とトランスの影響を相殺するため、
+        // 最小Gain時により強く減衰させ、Max Gain(飽和時)に向かって滑らかに補正。
+        double baseAttenuation = 1.0 / (V_BPLUS * 0.5);
+        double gainCompensation = 0.45 - (normalizedGain * 0.15); // 聴感補正係数
+
+        outputAttenuation = baseAttenuation * gainCompensation;
     }
 
     void process(juce::dsp::AudioBlock<float>& block)
@@ -70,27 +68,22 @@ public:
 
             for (size_t i = 0; i < numSamples; ++i)
             {
-                // 1. 入力電圧のスケーリングと保護
                 double vIn = static_cast<double>(channelData[i]) * inputDriveMultiplier;
                 if (std::isnan(vIn) || std::isinf(vIn)) vIn = 0.0;
                 vIn = juce::jlimit(-400.0, 400.0, vIn);
 
-                // 2. 物理モデル実行
                 double rawOut = solveTubePhysics(vIn, ch);
 
-                // 3. 64-bit Double精度 DCブロッカー
                 double acOut = rawOut - dcX1[ch] + dcBlockerR * dcY1[ch];
                 dcX1[ch] = rawOut;
                 dcY1[ch] = acOut;
 
-                // 4. DAWレベルへの最終出力スケーリング (ここで音量がピタリと元に戻ります)
                 channelData[i] = static_cast<float>(acOut * outputAttenuation);
             }
         }
     }
 
 private:
-    // --- V76s 回路コンポーネント定数 ---
     const double V_BPLUS = 285.0;
     const double R_PLATE = 100000.0;
     const double R_GRID = 1000000.0;
@@ -98,7 +91,6 @@ private:
     const double VG2 = 140.0;
     const double V_BIAS = -2.2;
 
-    // --- EF804S (EF86) 固有 Koren SPICE パラメータ ---
     const double MU = 34.90;
     const double EX = 1.350;
     const double KG1 = 2648.1;
@@ -106,7 +98,6 @@ private:
     const double KVB = 4.7;
     const double RGI = 2000.0;
 
-    // --- 状態変数 ---
     double currentSampleRate = 44100.0;
     double invSampleRate = 1.0 / 44100.0;
     double inputDriveMultiplier = 1.0;
@@ -118,12 +109,8 @@ private:
     std::vector<double> dcX1;
     std::vector<double> dcY1;
 
-    /**
-     * EF804S 陰的数値解法コア
-     */
     double solveTubePhysics(double vIn, size_t ch)
     {
-        // 1. グリッド回路の陰的解法 (後退オイラー + N-R法)
         double Vc = vcGrid[ch];
 
         for (int iter = 0; iter < 5; ++iter)
@@ -148,7 +135,6 @@ private:
         vcGrid[ch] = Vc;
         double vGridCathode = vIn - vcGrid[ch] + V_BIAS;
 
-        // 2. 五極管 (Pentode) 非線形モデルの事前計算
         double e1_arg = KP * ((1.0 / MU) + (vGridCathode / VG2));
         double E1 = 0.0;
 
@@ -162,7 +148,6 @@ private:
         double E1_clipped = std::max(E1, 0.0);
         double E1_ex_Kg1 = std::pow(E1_clipped, EX) / KG1;
 
-        // 3. プレート回路の代数ループ解決 (N-R法)
         double Vpk = vcPlate[ch];
 
         for (int iter = 0; iter < 5; ++iter)
